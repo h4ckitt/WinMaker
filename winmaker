@@ -1,0 +1,148 @@
+#!/bin/bash
+
+devices=($(lsblk | awk '{if ($3 == 1 && $0 ~ /^[a-z]{3}/) print $1;}'))
+winmount="/media/Windows-$(date +%s)"
+isomount="/media/ISO-$(date +%s)"
+
+showdevices() {
+	declare -i count=1
+
+	if [[ ${#devices[@]} -eq 0 ]]; then
+		echo "No Devices Found, Exiting ..."
+		exit 0
+	fi
+   
+	for i in ${devices[@]}; do
+		echo "$count. /dev/$i"
+		echo ""
+		count+=1
+	done
+
+	echo -n "Enter The Index Of The Device ==> "
+	read -r dev
+	device="/dev/${devices[$(($dev-1))]}"
+}
+
+checkExit() {
+	[ $? -eq 0 ] || {
+		echo "Something Went Wrong On This Step, Exiting"
+		exit 1
+	}
+}
+
+for i in parted mkfs.ntfs fdisk rsync; do
+	[ ! -z "$(command -v $i)" ] || {
+		echo "One Or More Required Tools Are Not Installed"
+		echo "If You're On a Debian Or Ubuntu Operating System, Run:"
+		echo "sudo apt install bla bla bla"
+		exit 1
+	}
+done
+
+[ ! -z $1 ] || {
+	echo "Usage: $0 <path_to_iso> <device>"
+	exit 0
+}
+
+[ -f $1 ] || {
+	echo "Sepcified ISO File Doesn't Exist"
+	exit 1
+}
+
+if [[ ! -z $2 ]]; then
+	device="$2"
+else
+	showdevices
+fi
+
+# Check Whether The Chosen Device Exists
+found=0
+echo "$device"
+for i in ${devices[@]}; do
+	if [[ "/dev/$i" == "$device" ]]; then
+		found=1
+		break
+	fi
+done
+
+[ $found -eq 1 ] || {
+	echo "Couldn't Find Device: $device"
+	exit 1
+}
+
+# First Delete The Partition Table And Make It MSDOS
+echo "[+] Creating Partition Table (msdos)"
+#echo ""
+parted -s $device mklabel msdos
+checkExit
+echo "Done"
+echo ""
+
+# Make An NTFS Partition On The Device
+echo "[+] Creating Primary Partition...."
+#echo ""
+parted -s $device mkpart primary ntfs 1G 15G
+checkExit
+echo "Done"
+echo ""
+
+echo "[+] Converting Primary Partition To Mountable NTFS ...."
+#echo ""
+mkfs.ntfs -Q -L "Windows USB" "$device"1
+checkExit
+echo "Done"
+echo ""
+
+echo "[+] Creating Mount Directories...."
+mkdir $winmount && mkdir $isomount
+echo "Done"
+echo ""
+
+echo "[+] Mounting Device .... "
+mount -o rw "$device"1 $winmount
+checkExit
+echo "Done"
+echo ""
+
+echo "[+] Mounting ISO ...."
+mount -o loop "$1" $isomount
+checkExit
+echo "Done"
+echo ""
+
+echo "[+] Copying ISO Files To USB Drive ...."
+rsync -ah --info=progress2 $isomount/* $winmount
+checkExit
+echo "Done"
+echo ""
+
+echo "[+] Installing Grub ...."
+grub-install --target=i386-pc --boot-directory=$winmount/boot $device
+checkExit
+echo "Done"
+echo ""
+
+uuid=$(blkid "$device"1 | grep -oP '(?<=UUID=")\w+(?=")')
+
+echo "[+] Creating Grub.cfg ...."
+cat << EOF > $winmount/boot/grub/grub.cfg
+echo "Wubbalubbadubdub, We Booted Windows Successfully :)"
+insmod ntfs
+insmod search_fs_uuid
+search --no-floppy --fs-uuid $uuid --set root
+ntldr /bootmgr
+boot
+EOF
+checkExit
+echo "Done"
+
+echo "[+] Setting Boot Flag ...."
+parted -s $device set 1 boot on
+checkExit
+echo "Done"
+
+umount $winmount
+umount $isomount
+
+rm -rf $winmount
+rm -rf $isomount
